@@ -1,4 +1,5 @@
 import os
+import re
 import hmac
 import json
 import time
@@ -196,29 +197,44 @@ def build_prompt(findings: list, top_win, top_gap) -> str:
     infos = [x["text"] for x in findings if x["kind"] == "info"]
     info_lines = "\n".join(f"- {t}" for t in infos) if infos else "- (none)"
 
-    if top_win:
-        s1 = "Sentence 1 is about the TOP WIN."
+    if top_win and top_gap:
+        shape = (
+            "Sentence 1 states the good news. Sentence 2 states the main thing to improve."
+        )
+    elif top_gap:
+        shape = (
+            "There is no good news to report this period. Do NOT claim progress, "
+            "momentum, or that they are on track. Sentence 1 plainly states the main "
+            "thing to improve. Sentence 2 is a brief, neutral, encouraging line about "
+            "the week ahead that makes no claim about results."
+        )
+    elif top_win:
+        shape = (
+            "Sentence 1 states the good news. Sentence 2 is a short line about "
+            "keeping it up."
+        )
     else:
-        s1 = "Sentence 1 is a short, encouraging line about tracking their progress."
-    if top_gap:
-        s2 = "Sentence 2 is about the TOP GAP."
-    else:
-        s2 = "Sentence 2 is a short line about keeping up the good momentum."
+        shape = (
+            "Sentence 1 says there is not much data yet. Sentence 2 encourages "
+            "logging more."
+        )
 
     return (
         "You are a friendly, practical fitness coach writing a short report.\n"
         "The facts below are verified and already correct. Use ONLY these facts. "
         "Do not add numbers, change any fact, or mention anything not listed.\n\n"
-        f"TOP WIN: {top_win or 'none this period'}\n"
-        f"TOP GAP: {top_gap or 'none this period'}\n\n"
-        f"OTHER INFO:\n{info_lines}\n\n"
+        f"Good news: {top_win or 'none this period'}\n"
+        f"Main thing to improve: {top_gap or 'none this period'}\n\n"
+        f"Other info:\n{info_lines}\n\n"
         "Reply with JSON only, in exactly this shape:\n"
         '{"summary": "..."}\n\n'
         "Rules:\n"
-        f"- summary: EXACTLY 2 sentences. {s1} {s2}\n"
+        f"- summary: EXACTLY 2 sentences. {shape}\n"
         "- Write in second person, speaking directly to the reader as 'you'. "
         "Never say 'the participant' or 'the user'.\n"
-        "- Do not write the words 'TOP WIN' or 'TOP GAP' in the summary.\n"
+        "- Never write the words 'top win', 'top gap', 'good news' or 'main thing' "
+        "in the summary.\n"
+        "- A shortfall is never progress. Do not spin a gap as a positive.\n"
         "- Do not give advice or tips. Only describe how the period went.\n"
         "- Do not give medical advice."
     )
@@ -276,8 +292,7 @@ def report(metrics: Metrics, x_api_key: str = Header(default="")):
     except json.JSONDecodeError:
         summary = raw
 
-    for label in ("TOP WIN:", "TOP GAP:"):
-        summary = summary.replace(label, "")
+    summary = re.sub(r"(?i)\btop\s+(win|gap)\b:?", "", summary)
     summary = " ".join(summary.split())
 
     return {
