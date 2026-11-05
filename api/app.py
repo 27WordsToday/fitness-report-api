@@ -330,6 +330,9 @@ def build_prompt(findings: list, top_win, top_gap) -> str:
         "in the summary.\n"
         "- A shortfall is never progress. Do not spin a gap as a positive.\n"
         "- Do not give advice or tips. Only describe how the period went.\n"
+        "- Never say a number is normal, expected, typical, healthy, safe or within a range "
+        "unless a fact above says exactly that. For resting heart rate and HRV, only say what "
+        "the facts say (the average, and whether it went up or down). Do not judge them.\n"
         "- Do not give medical advice."
     )
 
