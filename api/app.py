@@ -4,6 +4,7 @@ import hmac
 import json
 import time
 import httpx
+from datetime import date, timedelta
 from typing import Optional
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
@@ -41,16 +42,61 @@ class Goals(BaseModel):
     target_weight_lb: Optional[float] = None
 
 
+class CheckinEntry(BaseModel):
+    date: str
+    steps: Optional[float] = None
+    sleep_hours: Optional[float] = None
+    rhr: Optional[float] = None
+    hrv: Optional[float] = None
+    vo2: Optional[float] = None
+
+
 class Metrics(BaseModel):
     period_days: int = 7
+    checkins: list[CheckinEntry] = []
+    age: Optional[int] = None
+    period_end: Optional[str] = None
     weight: list[WeightEntry] = []
     nutrition: list[NutritionEntry] = []
     workouts: list[WorkoutEntry] = []
     goals: Goals = Goals()
 
 
+def _window_avg(entries, field, start, end):
+    vals = [getattr(e, field) for e in entries
+            if getattr(e, field) is not None and start <= e.date <= end]
+    return sum(vals) / len(vals) if vals else None
+
+
+def compute_checkin_stats(m: Metrics) -> Optional[dict]:
+    """7-day averages (and the 7 days before) for the check-in numbers. None if nothing was sent."""
+    entries = [e for e in m.checkins]
+    if not entries:
+        return None
+    try:
+        end = date.fromisoformat(m.period_end) if m.period_end else max(date.fromisoformat(e.date) for e in entries)
+    except ValueError:
+        return None
+    cur = (str(end - timedelta(days=6)), str(end))
+    prev = (str(end - timedelta(days=13)), str(end - timedelta(days=7)))
+    out = {"age": m.age}
+    for key, field in (("steps", "steps"), ("sleep_hours", "sleep_hours"), ("rhr", "rhr"), ("hrv", "hrv")):
+        a = _window_avg(entries, field, *cur)
+        b = _window_avg(entries, field, *prev)
+        if a is not None:
+            out[key] = {"avg": round(a, 1), "prev_avg": round(b, 1) if b is not None else None}
+    vo2 = sorted((e.date, e.vo2) for e in entries if e.vo2 is not None and prev[0] <= e.date <= cur[1])
+    if len(vo2) >= 2:
+        out["vo2"] = {"first": round(vo2[0][1], 1), "latest": round(vo2[-1][1], 1)}
+    return out if len(out) > 1 else None
+
+
 def compute_stats(m: Metrics) -> dict:
     stats = {"period_days": m.period_days}
+
+    ck = compute_checkin_stats(m)
+    if ck:
+        stats["checkins"] = ck
 
     w = sorted(m.weight, key=lambda x: x.date)
     if w:
@@ -174,6 +220,54 @@ def compute_findings(stats: dict) -> list:
         else:
             add("info", 9, f"Completed {wk['count']} workouts.")
         add("info", 9, f"Workout types: {', '.join(wk['types'].keys())}. Total workout time was {wk['total_minutes']} minutes.")
+
+    ck = stats.get("checkins")
+    if ck:
+        st = ck.get("steps")
+        if st:
+            avg = round(st["avg"])
+            older = ck.get("age") is not None and ck["age"] >= 65
+            lo, hi = (6000, 8000) if older else (7000, 10000)
+            rng = f"{lo:,} to {hi:,}"
+            if avg >= lo:
+                add("win", 3, f"Average daily steps ({avg:,}) were in or above the typical {rng} range.")
+            else:
+                add("gap", 3, f"Average daily steps ({avg:,}) were below the typical {rng} range.",
+                    "Add a short walk or two each day to bring your steps up.")
+        sl = ck.get("sleep_hours")
+        if sl:
+            avg = sl["avg"]
+            if 7 <= avg <= 9:
+                add("win", 3, f"Average sleep ({avg} hours) was inside the 7 to 9 hour target.")
+            else:
+                add("gap", 3, f"Average sleep ({avg} hours) was outside the 7 to 9 hour target.",
+                    "Aim for a steady bedtime so you land between 7 and 9 hours of sleep.")
+        r = ck.get("rhr")
+        if r:
+            avg = r["avg"]
+            prev = r["prev_avg"]
+            if prev is not None and avg - prev >= 5:
+                add("gap", 2, f"Resting heart rate averaged {avg} bpm, up {round(avg - prev, 1)} bpm from the week before, which is worth watching.",
+                    "Go easy on recovery and sleep while your resting heart rate settles back down.")
+            elif prev is not None:
+                d = round(avg - prev, 1)
+                move = f"up {d}" if d > 0 else f"down {abs(d)}" if d < 0 else "unchanged"
+                add("info", 9, f"Resting heart rate averaged {avg} bpm, {move} from the week before.")
+            else:
+                add("info", 9, f"Resting heart rate averaged {avg} bpm.")
+        h = ck.get("hrv")
+        if h:
+            avg = h["avg"]
+            prev = h["prev_avg"]
+            if prev is not None:
+                d = round(avg - prev, 1)
+                move = "up" if d > 0 else "down" if d < 0 else "unchanged"
+                add("info", 9, f"HRV averaged {avg} ms, {move} from the week before.")
+            else:
+                add("info", 9, f"HRV averaged {avg} ms.")
+        v = ck.get("vo2")
+        if v:
+            add("info", 9, f"VO2 max went from {v['first']} to {v['latest']} over the last two weeks.")
 
     return f
 
